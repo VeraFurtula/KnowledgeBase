@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { IconMenu } from "../components/Icons";
 import { Sidebar } from "../components/Sidebar";
+import { FAVICON_PNG } from "../brand";
 import styles from "./AppShell.module.css";
 
 type Props = {
@@ -48,6 +49,7 @@ export function AppShell({ children, showSidebar = true, title = "Knowledge Base
         <div className={styles.main}>
           <header className={styles.header}>
             <Link to="/" className={styles.brand}>
+              <img src={FAVICON_PNG} alt="" className={styles.brandIcon} aria-hidden />
               <span className={styles.brandText}>{title}</span>
             </Link>
             <div className={styles.headerRight}>

@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { PromptBar } from "../components/PromptBar";
+import { ContextQualityBadge } from "../components/ContextQualityBadge";
 import { useChat } from "../context/ChatContext";
 import { useDocuments } from "../context/DocumentsContext";
 import { AppShell } from "../layouts/AppShell";
 import { LEARNING_ENVIRONMENT_LOGIN_CTA_LABEL } from "../chat/learningEnvironmentLoginHelp";
-import type { ChatMessage } from "../types/chat";
+import { isRagBackendConfigured } from "../services/ragBackend";
+import { checkRagHealth } from "../services/ragHealth";
+import type { ChatMessage, SourceImage } from "../types/chat";
 import styles from "./ChatPage.module.css";
 
 type LocationState = { initialMessage?: string };
@@ -22,16 +27,53 @@ function requestEfrontPlaywrightRunFromDevServer() {
   });
 }
 
+function SourceImages({ images }: { images: SourceImage[] }) {
+  if (images.length === 0) return null;
+  return (
+    <div className={styles.sourceImages}>
+      <p className={styles.sourceImagesLabel}>
+        Screenshots from documentation
+        <span className={styles.sourceImagesHint}>
+          {" "}— ranked by relevance to this answer · click to enlarge
+        </span>
+      </p>
+      <div className={styles.sourceImagesGrid}>
+        {images.map((img, idx) => (
+          <figure key={img.url} className={styles.sourceImageFigure}>
+            <a href={img.url} target="_blank" rel="noopener noreferrer" title="Open full size">
+              <img
+                src={img.url}
+                alt={`Slide ${img.slide} from ${img.source}`}
+                className={styles.sourceImageThumb}
+              />
+            </a>
+            <figcaption className={styles.sourceImageCaption}>
+              <span className={styles.sourceImageRank}>#{idx + 1}</span>
+              {" "}Slide {img.slide}
+              <span className={styles.sourceImageDoc}>{img.source}</span>
+            </figcaption>
+          </figure>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AssistantAnswerBlock({ msg }: { msg: ChatMessage }) {
   const isLearningLoginCta =
     msg.cta?.label === LEARNING_ENVIRONMENT_LOGIN_CTA_LABEL && Boolean(msg.cta.href);
 
   return (
     <>
+      {!msg.pending && <ContextQualityBadge contextChars={msg.contextChars} />}
       <div
         className={`${styles.turnAnswerBody}${msg.pending ? ` ${styles.turnAnswerPending}` : ""}`}
       >
-        {msg.text}
+        {msg.pending ? (
+          msg.text
+        ) : (
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+        )}
       </div>
       {msg.cta && !msg.pending ? (
         <div className={styles.ctaRow}>
@@ -48,6 +90,9 @@ function AssistantAnswerBlock({ msg }: { msg: ChatMessage }) {
           </a>
         </div>
       ) : null}
+      {!msg.pending && msg.sourceImages && msg.sourceImages.length > 0 && (
+        <SourceImages images={msg.sourceImages} />
+      )}
     </>
   );
 }
@@ -91,8 +136,18 @@ export function ChatPage() {
 
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadNote, setUploadNote] = useState<string | null>(null);
+  const [duplicateNote, setDuplicateNote] = useState<string | null>(null);
   const [titleEditing, setTitleEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  const [ragDown, setRagDown] = useState(false);
+  const [ragBannerDismissed, setRagBannerDismissed] = useState(false);
+
+  useEffect(() => {
+    if (!isRagBackendConfigured()) return;
+    checkRagHealth().then((ok) => {
+      if (!ok) setRagDown(true);
+    });
+  }, []);
 
   const session = chatId ? getSession(chatId) : undefined;
   const initialMessage = (location.state as LocationState | null)?.initialMessage;
@@ -102,16 +157,25 @@ export function ChatPage() {
       if (!session || files.length === 0) return;
       setUploadBusy(true);
       setUploadNote(null);
-      const { added, errors } = await uploadFiles(session.category, files);
+      setDuplicateNote(null);
+      const { added, errors, duplicates } = await uploadFiles(session.category, files);
       setUploadBusy(false);
-      if (errors.length && !added.length) {
-        setUploadNote(errors.join("\n"));
-      } else if (errors.length) {
-        setUploadNote(`Uploaded ${added.length} file(s). Some issues:\n${errors.join("\n")}`);
-      } else {
-        setUploadNote(`Added ${added.length} file(s) to your eFront workspace.`);
+
+      if (duplicates.length) {
+        const names = duplicates.map((n) => `"${n}"`).join(", ");
+        setDuplicateNote(
+          `File already uploaded: ${names}. Remove the existing file first if you want to replace it.`
+        );
+        window.setTimeout(() => setDuplicateNote(null), 8000);
       }
-      window.setTimeout(() => setUploadNote(null), 6000);
+
+      if (added.length || errors.length) {
+        const parts: string[] = [];
+        if (added.length) parts.push(`Added ${added.length} file(s) to your eFront workspace.`);
+        if (errors.length) parts.push(`Issues:\n${errors.join("\n")}`);
+        setUploadNote(parts.join("\n\n"));
+        window.setTimeout(() => setUploadNote(null), 6000);
+      }
     },
     [session, uploadFiles]
   );
@@ -228,6 +292,24 @@ export function ChatPage() {
       </div>
 
       {uploadNote && <p className={styles.uploadNote}>{uploadNote}</p>}
+      {duplicateNote && <p className={styles.duplicateNote}>{duplicateNote}</p>}
+
+      {ragDown && !ragBannerDismissed && (
+        <div className={styles.ragWarning}>
+          <span>
+            RAG server is not reachable — answers will use keyword search only and may miss content
+            from your uploads. Start it with:{" "}
+            <code>npm run rag:dev</code>
+          </span>
+          <button
+            type="button"
+            className={styles.ragWarningDismiss}
+            onClick={() => setRagBannerDismissed(true)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       <div className={styles.body}>
         <div className={styles.thread}>

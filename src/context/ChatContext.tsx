@@ -47,14 +47,19 @@ function chatsKey(email: string) {
   return `kb-chats-v1-${email.toLowerCase()}`;
 }
 
+const SESSION_TTL_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
+
 function loadSessions(email: string): ChatSession[] {
   try {
     const raw = localStorage.getItem(chatsKey(email));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as ChatSession[];
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const cutoff = Date.now() - SESSION_TTL_MS;
+    const alive = parsed
       .filter((s) => s && typeof s.id === "string")
+      // Keep only sessions updated within the last 2 days
+      .filter((s) => (s.updatedAt ?? 0) >= cutoff)
       .map((s) => ({
         ...s,
         category: normalizeCategory(s.category),
@@ -70,6 +75,7 @@ function loadSessions(email: string): ChatSession[] {
             )
           : [],
       }));
+    return alive;
   } catch {
     return [];
   }
@@ -115,29 +121,31 @@ function buildRetrievalQuery(
   return core.slice(-22_000);
 }
 
-/** True when the user's question touches eFront configuration concepts. */
-function isConfigurationQuestion(text: string): boolean {
-  return /\b(access.?right|user.?right|condition|region|profile|page|section|control|button|field|visib|accessib|workflow|permission|customize|global|mandatory|warning|error|hide|show|enable|disable|lookup|dynamic|fund|company|deal|report|query)\b/i.test(text);
-}
-
 /**
- * Sub-queries targeting distinct document types so Chroma is asked from
- * different semantic directions. Each query targets a different eFront doc category.
+ * Sub-queries targeting distinct domains + one broad sweep.
+ * The broad sweep is critical: it queries each uploaded document with a general
+ * eFront phrase so even docs that aren't primarily about the user's topic
+ * still contribute their most representative chunks.
  */
 const AR_SUB_QUERIES = [
-  // targets User Rights Management PDF / Administrator Guide
-  "eFront user administration rights management system administrator users groups configuration guide",
-  // targets workflow / fund operations docs
-  "eFront workflow status fund operations regions data segregation multi-client visibility",
-  // targets fields / validation / conditions docs
-  "eFront mandatory warning error field validation conditions JavaScript profile object state",
+  // Broad sweep — ensures ALL uploaded docs contribute regardless of topic match
+  "eFront Invest software fund administration documentation guide features overview administrator user",
+  // Object-level AR: Fund, Company, Deal, Report entities
+  "eFront fund company deal contact operation report object access rights page section entity type configure",
+  // UI-level AR: pages, sections, controls, buttons, fields, context menus, lookup filters
+  "eFront page section control button field context menu lookup filter tab access rights hide show disable",
+  // Implementation: consultant steps, profile assignment, workflow, conditions
+  "eFront administrator configure access rights step profile assign workflow status condition object instance",
 ];
 
 /**
- * Extract the Source: filename from a RAG chunk (first line beginning with "Source:").
+ * Extract ONLY the filename from a RAG chunk's "Source:" line.
+ * The server formats it as: "Source: filename.pptx | module: X | page: N | section: Y"
+ * We want only "filename.pptx" — everything before the first " | ".
+ * Without this, every slide/page gets treated as a separate "document".
  */
 function chunkSource(chunk: string): string {
-  const m = chunk.match(/^Source:\s*(.+)$/m);
+  const m = chunk.match(/^Source:\s*([^|]+)/m);
   return m ? m[1].trim() : "__unknown__";
 }
 
@@ -147,9 +155,8 @@ function chunkSource(chunk: string): string {
  * This prevents one high-scoring file from monopolising the context window.
  */
 function diversifyBySource(chunks: string[], minPerSource: number, maxChars: number): string[] {
-  const CHUNK_SEP_LEN = "\n\n══════════════\n\n".length;
+  const CHUNK_SEP_LEN = "\n\n---\n\n".length;
 
-  // Group chunks by source filename
   const bySource = new Map<string, string[]>();
   for (const chunk of chunks) {
     const src = chunkSource(chunk);
@@ -157,7 +164,7 @@ function diversifyBySource(chunks: string[], minPerSource: number, maxChars: num
     bySource.get(src)!.push(chunk);
   }
 
-  // First pass: guaranteed slots for every source
+  // First pass: guaranteed minimum slots per source (round-robin style)
   const guaranteed: string[] = [];
   const overflow: string[] = [];
   for (const sourceChunks of bySource.values()) {
@@ -165,7 +172,6 @@ function diversifyBySource(chunks: string[], minPerSource: number, maxChars: num
     overflow.push(...sourceChunks.slice(minPerSource));
   }
 
-  // Fill remaining budget with leftover chunks
   const ordered = [...guaranteed, ...overflow];
   let used = 0;
   const result: string[] = [];
@@ -185,8 +191,41 @@ function diversifyBySource(chunks: string[], minPerSource: number, maxChars: num
 }
 
 /**
- * Run the main query plus targeted sub-queries in parallel, deduplicate by
- * content fingerprint, then enforce per-source diversity before returning.
+ * Format chunks grouped by source document with clear visual headers so that
+ * even small LLMs (e.g. llama3.2 3B) cannot miss that multiple documents exist
+ * and must be addressed individually before synthesizing.
+ */
+function groupChunksBySource(chunks: string[]): string {
+  const CHUNK_SEP = "\n\n---\n\n";
+  const BAR = "═".repeat(56);
+
+  const bySource = new Map<string, string[]>();
+  for (const chunk of chunks) {
+    const src = chunkSource(chunk);
+    if (!bySource.has(src)) bySource.set(src, []);
+    bySource.get(src)!.push(chunk);
+  }
+
+  const totalDocs = bySource.size;
+  const manifest = `[Retrieved context: ${totalDocs} source document(s) — ${[...bySource.keys()].join(" | ")}]`;
+
+  const sections: string[] = [manifest];
+  let n = 0;
+  for (const [src, srcChunks] of bySource.entries()) {
+    n++;
+    const header =
+      `\n${BAR}\nDOCUMENT ${n} OF ${totalDocs}: ${src}` +
+      `  (${srcChunks.length} excerpt${srcChunks.length !== 1 ? "s" : ""})\n${BAR}`;
+    sections.push(header + "\n\n" + srcChunks.join(CHUNK_SEP));
+  }
+
+  return sections.join("\n\n");
+}
+
+/**
+ * Run the main query plus all targeted sub-queries in parallel, deduplicate by
+ * content fingerprint, enforce per-source diversity, then return context
+ * grouped by document so the LLM sees clear "DOCUMENT N OF X" sections.
  */
 async function fetchMultiQueryRag(
   email: string,
@@ -195,13 +234,11 @@ async function fetchMultiQueryRag(
   k: number,
   maxChars: number
 ): Promise<{ context: string; imageRefs: SourceImage[] }> {
-  const queries: string[] = [mainQuery];
-  if (isConfigurationQuestion(userText)) {
-    for (const sq of AR_SUB_QUERIES) {
-      // Append a short slice of user text so Chroma stays on-topic per sub-query
-      queries.push(sq + " — " + userText.slice(0, 200));
-    }
-  }
+  // Always run all sub-queries — every eFront question benefits from breadth.
+  const queries: string[] = [
+    mainQuery,
+    ...AR_SUB_QUERIES.map((sq) => sq + " — " + userText.slice(0, 200)),
+  ];
 
   const settled = await Promise.allSettled(
     queries.map((q) => fetchRagContext(email, q, k))
@@ -210,17 +247,16 @@ async function fetchMultiQueryRag(
   const CHUNK_SEP = "\n\n══════════════\n\n";
   const seen = new Set<string>();
   const allChunks: string[] = [];
-  const images: SourceImage[] = [];
+  const allImages: SourceImage[] = [];
 
   for (const result of settled) {
     if (result.status !== "fulfilled") continue;
     const { context, imageRefs } = result.value;
-    for (const img of imageRefs) images.push(img);
+    for (const img of imageRefs) allImages.push(img);
     if (!context?.trim()) continue;
     for (const chunk of context.split(CHUNK_SEP)) {
       const trimmed = chunk.trim();
       if (!trimmed) continue;
-      // Deduplicate by first 140 chars of content
       const key = trimmed.replace(/\s+/g, " ").slice(0, 140);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -228,10 +264,54 @@ async function fetchMultiQueryRag(
     }
   }
 
-  // Enforce source diversity: every document gets at least 2 slots before
-  // the dominant file can fill the rest of the budget.
-  const diverse = diversifyBySource(allChunks, 2, maxChars);
-  return { context: diverse.join(CHUNK_SEP), imageRefs: images };
+  // Guarantee at least 4 chunks from every uploaded document before the
+  // dominant file can fill the remaining budget.
+  const diverse = diversifyBySource(allChunks, 4, maxChars);
+
+  // Rank images by cross-query frequency: images retrieved by multiple sub-queries
+  // are more topically relevant; also deduplicates and caps at 5 total.
+  const rankedImages = rankAndDeduplicateImages(allImages, 5);
+
+  // Group by source so the LLM sees clear DOCUMENT N OF X sections.
+  return { context: groupChunksBySource(diverse), imageRefs: rankedImages };
+}
+
+/**
+ * Deduplicate images across parallel sub-query results and rank by relevance.
+ * An image retrieved by more sub-queries is a stronger topic match.
+ */
+function rankAndDeduplicateImages(
+  allImages: SourceImage[],
+  maxImages: number
+): SourceImage[] {
+  const freq = new Map<string, number>();
+  const firstSeen = new Map<string, SourceImage>();
+  for (const img of allImages) {
+    freq.set(img.url, (freq.get(img.url) ?? 0) + 1);
+    if (!firstSeen.has(img.url)) firstSeen.set(img.url, img);
+  }
+  return [...firstSeen.values()]
+    .sort((a, b) => (freq.get(b.url) ?? 0) - (freq.get(a.url) ?? 0))
+    .slice(0, maxImages);
+}
+
+/**
+ * Build a brief image manifest string for the LLM so it knows which
+ * screenshots will appear below its answer and can reference/explain them.
+ */
+function buildImageManifest(images: SourceImage[]): string {
+  if (images.length === 0) return "";
+  const list = images
+    .map((img, i) => `  ${i + 1}. Slide ${img.slide} from "${img.source}"`)
+    .join("\n");
+  return (
+    `\n\n--- SCREENSHOTS AVAILABLE BELOW YOUR ANSWER ---\n` +
+    `These slides from the documentation will be displayed below your answer:\n${list}\n\n` +
+    `For each screenshot that directly illustrates a concept in your explanation, add one sentence:\n` +
+    `"The screenshot from Slide [N] of [document] shows [what it demonstrates] — [why it matters for consultants]."\n` +
+    `Only reference screenshots relevant to this specific answer. Skip slides that are not directly related.\n` +
+    `--- END SCREENSHOTS ---`
+  );
 }
 
 type LlmReplyJob = {
@@ -328,13 +408,23 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const historyForApi = [...priorForApi, userMsg];
       const retrievalQuery = buildRetrievalQuery(priorForApi, userText, category);
       /**
-       * Context budget — 8 000 chars ≈ 2 000 tokens.
-       * System prompt ≈ 800 tokens + context ≈ 2 000 + history ≈ 500 + user ≈ 50 → ~3 350 total.
-       * Stays under the 6 000 TPM limit of Groq free-tier small models.
-       * Multi-query RAG still surfaces content from multiple documents within this budget.
-       * Do NOT lower below 6 000 (too few chunks for multi-doc synthesis).
+       * Auto-detect context budget:
+       *  - Local Ollama (relative URL or localhost): 20 000 chars — good depth without
+       *    overloading a local CPU model. Set VITE_MAX_RETRIEVAL_CHARS=40000 for max depth.
+       *  - Cloud providers (Groq, Together, etc.): 12 000 chars — stays within ~6 000 TPM.
+       * Override at any time via VITE_MAX_RETRIEVAL_CHARS in .env.local.
        */
-      const MAX_RETRIEVAL_CHARS = 8_000;
+      const MAX_RETRIEVAL_CHARS = (() => {
+        const override = Number(import.meta.env.VITE_MAX_RETRIEVAL_CHARS);
+        if (override > 0) return override;
+        const base = String(import.meta.env.VITE_LLM_BASE_URL ?? "");
+        const isLocal =
+          base === "" ||
+          base.startsWith("/") ||
+          /localhost|127\.0\.0|ollama/i.test(base);
+        // 24 000 chars = ~6 000 tokens; fits 6 docs × 4 chunks × ~700 chars + separators
+        return isLocal ? 24_000 : 12_000;
+      })();
       /** Keyword windows from full documents (literal phrases, all uploaded files). */
       const keywordContext = buildContextForQuery(category, retrievalQuery);
       let fromDocs = keywordContext;
@@ -342,11 +432,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       if (isRagBackendConfigured()) {
         try {
           /**
-           * k=15 per sub-query. fetchMultiQueryRag runs 1 + 3 sub-queries for configuration
-           * questions, deduplicates, then enforces per-source diversity so no single file
-           * monopolises the context window.
+           * k=24 per sub-query → server gives max(2, 24÷6) = 4 chunks per source per query.
+           * With 5 queries (1 main + 4 sub), each of the 6 uploaded docs gets up to 20
+           * candidate chunks before dedup and diversity enforcement.
            */
-          const ragResult = await fetchMultiQueryRag(email, retrievalQuery, userText, 15, MAX_RETRIEVAL_CHARS);
+          const ragResult = await fetchMultiQueryRag(email, retrievalQuery, userText, 24, MAX_RETRIEVAL_CHARS);
           const rag = ragResult.context?.trim() ?? "";
           sourceImages = ragResult.imageRefs;
           const kw = keywordContext.trim();
@@ -384,7 +474,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           fromDocs;
       }
 
-      const system = buildSystemPrompt(fromDocs, userText);
+      const imageManifest = buildImageManifest(sourceImages);
+      const system = buildSystemPrompt(fromDocs, userText, imageManifest);
 
       let assistantText: string;
       try {

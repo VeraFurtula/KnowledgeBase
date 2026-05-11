@@ -135,6 +135,63 @@
   white-space: pre-wrap;
 }
 
+.duplicateNote {
+  flex-shrink: 0;
+  margin: 0 clamp(12px, 4vw, 22px) 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #fffbea;
+  border: 1px solid #f0d060;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #6b4c00;
+  max-width: 980px;
+  align-self: center;
+  white-space: pre-wrap;
+}
+
+.ragWarning {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 clamp(12px, 4vw, 22px) 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #fff4f4;
+  border: 1px solid #f5b8b8;
+  font-size: 0.85rem;
+  color: #7a1f1f;
+}
+
+.ragWarning code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  background: #ffe8e8;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.ragWarning span {
+  flex: 1;
+}
+
+.ragWarningDismiss {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: #7a1f1f;
+  font-size: 0.9rem;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.ragWarningDismiss:hover {
+  background: #ffdede;
+}
+
 .body {
   flex: 0 1 auto;
   min-width: 0;
@@ -214,14 +271,156 @@
   color: #2d2d2d;
   font-size: clamp(0.9rem, 2.3vw, 0.98rem);
   line-height: 1.65;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* Markdown-rendered content inside answers */
+.turnAnswerBody :global(p) { margin: 0 0 0.75em; }
+.turnAnswerBody :global(p:last-child) { margin-bottom: 0; }
+.turnAnswerBody :global(h1),
+.turnAnswerBody :global(h2),
+.turnAnswerBody :global(h3),
+.turnAnswerBody :global(h4) {
+  margin: 1em 0 0.4em;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.turnAnswerBody :global(h1) { font-size: 1.18em; }
+.turnAnswerBody :global(h2) { font-size: 1.08em; }
+.turnAnswerBody :global(h3) { font-size: 1em; }
+.turnAnswerBody :global(ul),
+.turnAnswerBody :global(ol) {
+  margin: 0.5em 0 0.75em;
+  padding-left: 1.5em;
+}
+.turnAnswerBody :global(li) { margin-bottom: 0.3em; }
+.turnAnswerBody :global(strong) { font-weight: 700; }
+.turnAnswerBody :global(em) { font-style: italic; }
+.turnAnswerBody :global(code) {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: #f1f1f1;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.turnAnswerBody :global(pre) {
+  background: #f5f5f5;
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.75em 0;
+}
+.turnAnswerBody :global(pre code) {
+  background: none;
+  padding: 0;
+}
+.turnAnswerBody :global(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75em 0;
+  font-size: 0.9em;
+}
+.turnAnswerBody :global(th),
+.turnAnswerBody :global(td) {
+  border: 1px solid #ddd;
+  padding: 6px 10px;
+  text-align: left;
+}
+.turnAnswerBody :global(th) { background: #f4f4f5; font-weight: 700; }
+.turnAnswerBody :global(blockquote) {
+  border-left: 3px solid #d0d0d0;
+  margin: 0.75em 0;
+  padding: 4px 12px;
+  color: #555;
+}
+.turnAnswerBody :global(hr) {
+  border: none;
+  border-top: 1px solid #e0e0e0;
+  margin: 1em 0;
 }
 
 .turnAnswerPending {
   color: var(--muted);
   font-style: italic;
+}
+
+.sourceImages {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #ececec;
+}
+
+.sourceImagesLabel {
+  margin: 0 0 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #999;
+}
+
+.sourceImagesHint {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  font-style: italic;
+}
+
+.sourceImagesGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sourceImageFigure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sourceImageThumb {
+  width: 220px;
+  height: 150px;
+  object-fit: contain;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: #f8f8f8;
+  cursor: zoom-in;
+  transition: border-color 0.15s;
+}
+
+.sourceImageThumb:hover {
+  border-color: var(--green);
+  box-shadow: 0 2px 8px rgba(132, 189, 58, 0.2);
+}
+
+.sourceImageCaption {
+  font-size: 0.7rem;
+  color: #999;
+  text-align: center;
+  max-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+
+.sourceImageRank {
+  font-weight: 700;
+  color: var(--green);
+  font-size: 0.65rem;
+}
+
+.sourceImageDoc {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+  font-size: 0.65rem;
+  color: #bbb;
 }
 
 .ctaRow {

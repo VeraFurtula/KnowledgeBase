@@ -34,6 +34,10 @@ export function Sidebar({ onClose }: Props) {
     exportDocumentsJson,
     clearAllDocuments,
     ragIndexError,
+    indexedSources,
+    indexedChunkCount,
+    forceResync,
+    resyncing,
   } = useDocuments();
   const [query, setQuery] = useState("");
   const [sidebarUploadBusy, setSidebarUploadBusy] = useState(false);
@@ -52,6 +56,23 @@ export function Sidebar({ onClose }: Props) {
       return s?.title.toLowerCase().includes(q);
     });
   }, [orderedSessionIds, query, getSession]);
+
+  /** Group chat IDs into Today / Yesterday buckets (2-day window). */
+  const groupedIds = useMemo(() => {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const yesterdayStart = todayStart - 86_400_000;
+    const today: string[] = [];
+    const yesterday: string[] = [];
+    for (const id of filteredIds) {
+      const s = getSession(id);
+      const t = s?.updatedAt ?? 0;
+      if (t >= todayStart) today.push(id);
+      else if (t >= yesterdayStart) yesterday.push(id);
+      // sessions older than 2 days are already filtered out by loadSessions
+    }
+    return { today, yesterday };
+  }, [filteredIds, getSession]);
 
   function handleNewChat() {
     const id = createChat();
@@ -169,6 +190,41 @@ export function Sidebar({ onClose }: Props) {
           RAG index: {ragIndexError}
         </p>
       )}
+      {ragOn && indexedSources !== null && (
+        <div className={styles.ragSources}>
+          {indexedSources.length === 0 ? (
+            <p className={styles.ragSourcesWarn}>
+              ⚠ Chroma: 0 docs indexed.
+            </p>
+          ) : (
+            <>
+              <p className={styles.ragSourcesTitle}>
+                Chroma: {indexedSources.length} doc{indexedSources.length !== 1 ? "s" : ""} · {indexedChunkCount} chunks
+                {indexedSources.length < docCount && (
+                  <span className={styles.ragSourcesMismatch}>
+                    {" "}(⚠ {docCount - indexedSources.length} not indexed)
+                  </span>
+                )}
+              </p>
+              <ul className={styles.ragSourcesList}>
+                {indexedSources.map((s) => (
+                  <li key={s} title={s}>{s}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {(indexedSources.length < docCount || indexedSources.length === 0) && (
+            <button
+              type="button"
+              className={styles.resyncBtn}
+              disabled={resyncing || docCount === 0}
+              onClick={forceResync}
+            >
+              {resyncing ? "Re-syncing…" : "Force re-sync to Chroma"}
+            </button>
+          )}
+        </div>
+      )}
 
       <button
         type="button"
@@ -213,42 +269,87 @@ export function Sidebar({ onClose }: Props) {
       </button>
       {sidebarNote && <p className={styles.sidebarNote}>{sidebarNote}</p>}
 
-      <p className={styles.sectionLabel}>Recent Chats</p>
-      <ul className={styles.list}>
-        {filteredIds.length === 0 ? (
+      <p className={styles.sectionLabel}>Chats (last 2 days)</p>
+      {filteredIds.length === 0 ? (
+        <ul className={styles.list}>
           <li className={styles.emptyHint}>No chats yet.</li>
-        ) : (
-          filteredIds.map((id) => {
-            const s = getSession(id);
-            if (!s) return null;
-            return (
-              <li key={id} className={styles.chatRow}>
-                <NavLink
-                  to={`/chat/${id}`}
-                  className={({ isActive }) =>
-                    `${styles.chatLink} ${isActive ? styles.rowActive : ""}`
-                  }
-                  onClick={onClose}
-                >
-                  <span className={styles.rowLeft}>
-                    <IconChat />
-                    <span className={styles.truncate}>{s.title}</span>
-                  </span>
-                </NavLink>
-                <button
-                  type="button"
-                  className={styles.deleteChat}
-                  aria-label={`Delete chat ${s.title}`}
-                  title="Delete chat"
-                  onClick={(e) => handleDeleteChat(id, e)}
-                >
-                  <IconTrash />
-                </button>
-              </li>
-            );
-          })
-        )}
-      </ul>
+        </ul>
+      ) : (
+        <>
+          {groupedIds.today.length > 0 && (
+            <>
+              <p className={styles.dayLabel}>Today</p>
+              <ul className={styles.list}>
+                {groupedIds.today.map((id) => {
+                  const s = getSession(id);
+                  if (!s) return null;
+                  return (
+                    <li key={id} className={styles.chatRow}>
+                      <NavLink
+                        to={`/chat/${id}`}
+                        className={({ isActive }) =>
+                          `${styles.chatLink} ${isActive ? styles.rowActive : ""}`
+                        }
+                        onClick={onClose}
+                      >
+                        <span className={styles.rowLeft}>
+                          <IconChat />
+                          <span className={styles.truncate}>{s.title}</span>
+                        </span>
+                      </NavLink>
+                      <button
+                        type="button"
+                        className={styles.deleteChat}
+                        aria-label={`Delete chat ${s.title}`}
+                        title="Delete chat"
+                        onClick={(e) => handleDeleteChat(id, e)}
+                      >
+                        <IconTrash />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
+          {groupedIds.yesterday.length > 0 && (
+            <>
+              <p className={styles.dayLabel}>Yesterday</p>
+              <ul className={styles.list}>
+                {groupedIds.yesterday.map((id) => {
+                  const s = getSession(id);
+                  if (!s) return null;
+                  return (
+                    <li key={id} className={styles.chatRow}>
+                      <NavLink
+                        to={`/chat/${id}`}
+                        className={({ isActive }) =>
+                          `${styles.chatLink} ${isActive ? styles.rowActive : ""}`
+                        }
+                        onClick={onClose}
+                      >
+                        <span className={styles.rowLeft}>
+                          <IconChat />
+                          <span className={styles.truncate}>{s.title}</span>
+                        </span>
+                      </NavLink>
+                      <button
+                        type="button"
+                        className={styles.deleteChat}
+                        aria-label={`Delete chat ${s.title}`}
+                        title="Delete chat"
+                        onClick={(e) => handleDeleteChat(id, e)}
+                      >
+                        <IconTrash />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
+        </>
+      )}
 
       <div className={styles.spacer} />
 

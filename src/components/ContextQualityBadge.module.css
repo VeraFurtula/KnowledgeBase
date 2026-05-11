@@ -1,0 +1,28 @@
+.badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 99px;
+  margin-bottom: 10px;
+}
+
+.good {
+  color: #2d6a0f;
+  background: #eaf5d8;
+  border: 1px solid #c4e59a;
+}
+
+.thin {
+  color: #7a5800;
+  background: #fff8dd;
+  border: 1px solid #f0d870;
+}
+
+.none {
+  color: #8b2020;
+  background: #ffeaea;
+  border: 1px solid #f5b8b8;
+}

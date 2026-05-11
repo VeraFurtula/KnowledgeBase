@@ -3,8 +3,8 @@ import type { ChatMessage } from "../types/chat";
 import { buildRagSystemPrompt } from "./ragSystemPrompt";
 
 /** Shorter history = less noise from old wrong answers; enough for 1–2 follow-ups. */
-const MAX_HISTORY = 12;
-const MAX_MSG_CHARS = 24_000;
+const MAX_HISTORY = 4;
+const MAX_MSG_CHARS = 3_000;
 
 /**
  * Shown when retrieval produced no text — avoids calling the LLM with empty context.
@@ -20,19 +20,24 @@ export function buildNoDocumentContextReply(): string {
   ].join("\n");
 }
 
-/** Appended only on the wire to the last user message — improves adherence to RAG on small models. */
+/**
+ * Appended to the last user message right before generation.
+ * Fires at the closest possible point to model output — reinforces domain
+ * for small models that lose system-prompt context over long prompts.
+ */
 export function buildRagLastUserSuffix(): string {
-  return "\n\n[Assistant instructions: Use **only** the **DOCUMENT CONTEXT** in the system message (eFront Invest). When that context is rich enough, write **detailed consultant-style learning notes**—deep explanations, linked concepts, practical examples from the docs, headings and prose—not a short bullet-only summary. No generic access-rights or IT-law essays. If the excerpts are thin, say so clearly instead of inventing.]";
+  return "\n\n[Domain reminder: Answer ONLY about eFront Invest fund administration — Funds, Deals, Companies, Operations, Access Rights, Profiles, Regions, Conditions, Pages, Controls, Buttons, Fields. NOT about LMS, students, courses, or learning content. Use ONLY the document context provided.]";
 }
 
 /**
  * System prompt for chat: plain RAG over `docExcerpt` (uploads + Chroma).
  * @param userQuestion Passed into the RAG closing block so the model stays on-topic.
+ * @param imageManifest Optional list of screenshots that will appear below the answer.
  */
-export function buildSystemPrompt(docExcerpt: string, userQuestion?: string): string {
+export function buildSystemPrompt(docExcerpt: string, userQuestion?: string, imageManifest?: string): string {
   const trimmed = docExcerpt.trim();
   if (trimmed) {
-    return buildRagSystemPrompt(trimmed, userQuestion);
+    return buildRagSystemPrompt(trimmed, userQuestion, imageManifest);
   }
 
   return `You are the **Junior eFront Consultant Assistant** for this app, but there is **no** document context in this request.

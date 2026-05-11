@@ -11,6 +11,12 @@ export function normalizeCategory(raw: unknown): Category {
   return "eFront";
 }
 
+export type SourceImage = {
+  source: string;
+  slide: number;
+  url: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -19,6 +25,10 @@ export type ChatMessage = {
   pending?: boolean;
   /** Optional call-to-action shown under the answer (not sent to the LLM). */
   cta?: { label: string; href: string };
+  /** Characters of document context that reached the model for this answer. */
+  contextChars?: number;
+  /** Slide images from the RAG-retrieved source documents. */
+  sourceImages?: SourceImage[];
 };
 
 export type ChatSession = {

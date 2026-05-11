@@ -5,12 +5,13 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { Category } from "../types/chat";
 import { newId, normalizeCategory } from "../types/chat";
 import { readAuthUserFromStorage, useAuth } from "./AuthContext";
-import { isRagBackendConfigured, reindexUserDocuments } from "../services/ragBackend";
+import { extractImagesFromFile, fetchIndexedSources, isRagBackendConfigured, reindexUserDocuments } from "../services/ragBackend";
 import { extractTextFromFile, truncateForStorage } from "../utils/extractDocumentText";
 import { buildDocumentContextForQuery } from "../utils/documentRetrieval";
 
@@ -22,7 +23,7 @@ export type KnowledgeDocument = {
   uploadedAt: number;
 };
 
-type UploadResult = { added: KnowledgeDocument[]; errors: string[] };
+type UploadResult = { added: KnowledgeDocument[]; errors: string[]; duplicates: string[] };
 
 type DocumentsContextValue = {
   documents: KnowledgeDocument[];
@@ -37,6 +38,14 @@ type DocumentsContextValue = {
   clearAllDocuments: () => void;
   /** Last RAG index error (e.g. server down); cleared on successful index. */
   ragIndexError: string | null;
+  /** Filenames currently indexed in Chroma (null = not yet fetched). */
+  indexedSources: string[] | null;
+  /** Total chunk count in Chroma for this user. */
+  indexedChunkCount: number;
+  /** Force a full re-sync of all localStorage documents into Chroma. */
+  forceResync: () => void;
+  /** True while a re-sync is in progress. */
+  resyncing: boolean;
 };
 
 const DocumentsContext = createContext<DocumentsContextValue | null>(null);
@@ -73,18 +82,72 @@ function toRagPayload(docs: KnowledgeDocument[]) {
 export function DocumentsProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
+  const documentsRef = useRef<KnowledgeDocument[]>([]);
   const [ragIndexError, setRagIndexError] = useState<string | null>(null);
+  const [indexedSources, setIndexedSources] = useState<string[] | null>(null);
+  const [indexedChunkCount, setIndexedChunkCount] = useState(0);
+  const [resyncing, setResyncing] = useState(false);
+
+  // Debounce timer — collapses rapid sequential syncRagIndex calls into one HTTP request.
+  const syncDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const refreshIndexedSources = useCallback((email: string) => {
+    if (!isRagBackendConfigured()) return;
+    void fetchIndexedSources(email).then(({ sources, chunkCount }) => {
+      setIndexedSources(sources);
+      setIndexedChunkCount(chunkCount);
+    });
+  }, []);
 
   const syncRagIndex = useCallback((email: string, docs: KnowledgeDocument[]) => {
     if (!isRagBackendConfigured()) return;
-    void reindexUserDocuments(email, toRagPayload(docs))
-      .then(() => setRagIndexError(null))
+    // Debounce: cancel any pending call and schedule a fresh one.
+    // This ensures rapid sequential uploads (or login + upload races) collapse into
+    // a single /index request carrying the full document list.
+    if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current);
+    syncDebounceRef.current = setTimeout(() => {
+      void reindexUserDocuments(email, toRagPayload(docs))
+        .then(() => {
+          setRagIndexError(null);
+        })
+        .catch((e) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error("[RAG] Index failed:", msg);
+          setRagIndexError(msg);
+        })
+        .finally(() => {
+          // Always refresh indexed sources — even on failure — so the
+          // Chroma section becomes visible and the Force re-sync button appears.
+          refreshIndexedSources(email);
+        });
+    }, 800);
+  }, [refreshIndexedSources]);
+
+  const forceResync = useCallback(() => {
+    const effective = user ?? readAuthUserFromStorage();
+    if (!effective || !isRagBackendConfigured()) return;
+    if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current);
+    const docs = documentsRef.current;
+    setResyncing(true);
+    void reindexUserDocuments(effective.email, toRagPayload(docs))
+      .then(() => {
+        setRagIndexError(null);
+        return fetchIndexedSources(effective.email);
+      })
+      .then(({ sources, chunkCount }) => {
+        setIndexedSources(sources);
+        setIndexedChunkCount(chunkCount);
+      })
       .catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
-        console.error("[RAG] Index failed:", msg);
         setRagIndexError(msg);
-      });
-  }, []);
+      })
+      .finally(() => setResyncing(false));
+  }, [user]);
+
+  useEffect(() => {
+    documentsRef.current = documents;
+  }, [documents]);
 
   useEffect(() => {
     if (!user) {
@@ -98,9 +161,11 @@ export function DocumentsProvider({ children }: { children: ReactNode }) {
   /** Push localStorage uploads to Chroma as soon as the user is known (fixes empty index after refresh / before first debounced run). */
   useEffect(() => {
     if (!user?.email || !isRagBackendConfigured()) return;
+    // Show what Chroma already has immediately (so the Force re-sync button appears right away).
+    refreshIndexedSources(user.email);
     const docs = loadDocs(user.email);
     syncRagIndex(user.email, docs);
-  }, [user?.email, syncRagIndex]);
+  }, [user?.email, syncRagIndex, refreshIndexedSources]);
 
   const listForCategory = useCallback(
     (category: Category) => documents.filter((d) => d.category === category),
@@ -124,12 +189,21 @@ export function DocumentsProvider({ children }: { children: ReactNode }) {
   const uploadFiles = useCallback(
     async (category: Category, files: File[]): Promise<UploadResult> => {
       const effective = user ?? readAuthUserFromStorage();
-      if (!effective) return { added: [], errors: ["Sign in to upload documents."] };
+      if (!effective) return { added: [], errors: ["Sign in to upload documents."], duplicates: [] };
 
       const added: KnowledgeDocument[] = [];
       const errors: string[] = [];
+      const duplicates: string[] = [];
+
+      const existingNames = new Set(
+        documentsRef.current.filter((d) => d.category === category).map((d) => d.filename)
+      );
 
       for (const file of files) {
+        if (existingNames.has(file.name)) {
+          duplicates.push(file.name);
+          continue;
+        }
         try {
           const raw = await extractTextFromFile(file);
           const text = truncateForStorage(raw);
@@ -137,13 +211,18 @@ export function DocumentsProvider({ children }: { children: ReactNode }) {
             errors.push(`${file.name}: no text could be read.`);
             continue;
           }
-          added.push({
+          const doc: KnowledgeDocument = {
             id: newId(),
             category,
             filename: file.name,
             text,
             uploadedAt: Date.now(),
-          });
+          };
+          added.push(doc);
+          existingNames.add(file.name);
+          if (isRagBackendConfigured() && file.name.toLowerCase().endsWith(".pptx")) {
+            void extractImagesFromFile(effective.email, file.name, file).catch(() => undefined);
+          }
         } catch (e) {
           errors.push(
             `${file.name}: ${e instanceof Error ? e.message : "Could not read file."}`
@@ -160,7 +239,7 @@ export function DocumentsProvider({ children }: { children: ReactNode }) {
         });
       }
 
-      return { added, errors };
+      return { added, errors, duplicates };
     },
     [user, syncRagIndex]
   );
@@ -231,6 +310,10 @@ export function DocumentsProvider({ children }: { children: ReactNode }) {
       exportDocumentsJson,
       clearAllDocuments,
       ragIndexError,
+      indexedSources,
+      indexedChunkCount,
+      forceResync,
+      resyncing,
     }),
     [
       documents,
@@ -241,6 +324,10 @@ export function DocumentsProvider({ children }: { children: ReactNode }) {
       exportDocumentsJson,
       clearAllDocuments,
       ragIndexError,
+      indexedSources,
+      indexedChunkCount,
+      forceResync,
+      resyncing,
     ]
   );
 
