@@ -125,15 +125,12 @@ function isConfigurationQuestion(text: string): boolean {
 
 /**
  * Topic-targeted sub-queries that force Chroma to fetch from different
- * semantic neighbourhoods. Each one focuses on a distinct eFront concept cluster
- * so documents that don't surface in a broad query are still retrieved.
+ * semantic neighbourhoods. Kept to 2 to limit token usage on free-tier APIs
+ * while still covering the two most distinct concept clusters.
  */
 const AR_SUB_QUERIES = [
-  "eFront Invest access rights user rights management profiles regions conditions configuration",
-  "eFront Invest global access rights customize access rights pages sections controls buttons",
-  "eFront Invest conditions reusable boolean rules workflow status object state dynamic UI visibility",
-  "eFront Invest regions data segregation multi-client deployment fund visibility",
-  "eFront Invest mandatory warning error field validation workflow-based permissions",
+  "eFront Invest global access rights customize pages sections controls buttons conditions reusable rules profile workflow",
+  "eFront Invest regions data segregation mandatory warning error field validation workflow-based permissions dynamic UI",
 ];
 
 /**
@@ -273,11 +270,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const historyForApi = [...priorForApi, userMsg];
       const retrievalQuery = buildRetrievalQuery(priorForApi, userText, category);
       /**
-       * Context budget — must be large enough to hold chunks from multiple documents.
-       * 30 000 chars ≈ 7 500 tokens, comfortably within every supported LLM context window.
-       * Previously was 3 500 (one page) which caused single-document answers; do NOT lower again.
+       * Context budget — 8 000 chars ≈ 2 000 tokens.
+       * System prompt ≈ 800 tokens + context ≈ 2 000 + history ≈ 500 + user ≈ 50 → ~3 350 total.
+       * Stays under the 6 000 TPM limit of Groq free-tier small models.
+       * Multi-query RAG still surfaces content from multiple documents within this budget.
+       * Do NOT lower below 6 000 (too few chunks for multi-doc synthesis).
        */
-      const MAX_RETRIEVAL_CHARS = 30_000;
+      const MAX_RETRIEVAL_CHARS = 8_000;
       /** Keyword windows from full documents (literal phrases, all uploaded files). */
       const keywordContext = buildContextForQuery(category, retrievalQuery);
       let fromDocs = keywordContext;
@@ -285,18 +284,18 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       if (isRagBackendConfigured()) {
         try {
           /**
-           * k=30 fetches 30 chunks per sub-query.
-           * fetchMultiQueryRag runs 1 + 5 sub-queries for configuration questions,
-           * then deduplicates — this forces Chroma to surface content from multiple documents.
+           * k=15 per sub-query. fetchMultiQueryRag runs 1 + 2 sub-queries for configuration
+           * questions and deduplicates — forces multiple documents into context while keeping
+           * token usage manageable on free-tier APIs.
            */
-          const ragResult = await fetchMultiQueryRag(email, retrievalQuery, userText, 30);
+          const ragResult = await fetchMultiQueryRag(email, retrievalQuery, userText, 15);
           const rag = ragResult.context?.trim() ?? "";
           sourceImages = ragResult.imageRefs;
           const kw = keywordContext.trim();
           if (rag && kw) {
             const sep =
               "\n\n══════════════\n\n--- Keyword-aligned excerpts (same uploads; complements semantic search) ---\n\n";
-            fromDocs = mergeRagWithKeywordBudget(rag, kw, sep, MAX_RETRIEVAL_CHARS, 10_000);
+            fromDocs = mergeRagWithKeywordBudget(rag, kw, sep, MAX_RETRIEVAL_CHARS, 2_500);
           } else if (rag) {
             fromDocs =
               rag.length <= MAX_RETRIEVAL_CHARS
