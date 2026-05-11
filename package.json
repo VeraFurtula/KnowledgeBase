@@ -1,0 +1,36 @@
+{
+  "name": "knowledge-base",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "rag:dev": "cd server && python -m uvicorn app:app --reload --host 127.0.0.1 --port 8000",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:efront": "playwright test --config=playwright.efront.config.ts",
+    "test:e2e:efront:headed": "playwright test --config=playwright.efront.config.ts --headed",
+    "test:e2e:efront:debug": "playwright test --config=playwright.efront.config.ts --debug",
+    "test:e2e:efront:ui": "playwright test --config=playwright.efront.config.ts --ui --ui-host=127.0.0.1 --ui-port=0"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.6.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.4.0",
+    "typescript": "~5.8.0",
+    "vite": "^6.3.0"
+  }
+}

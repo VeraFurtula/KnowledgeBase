@@ -1,0 +1,74 @@
+:root {
+  --green: #84bd3a;
+  --green-soft: rgba(132, 189, 58, 0.18);
+  --green-glow: rgba(132, 189, 58, 0.35);
+  --ink: #1a1a1a;
+  --muted: #6b6b6b;
+  --line: #e8e8e8;
+  --surface: #ffffff;
+  --sidebar: #252525;
+  --sidebar-hover: #323232;
+  --input-bg: #f3f3f3;
+  --radius-lg: 22px;
+  --radius-pill: 999px;
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-serif: "DM Serif Display", Georgia, serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  height: 100%;
+  max-height: 100dvh;
+}
+
+body {
+  margin: 0;
+  height: 100%;
+  max-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  background: #fafafa;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+button:not(:disabled) {
+  touch-action: manipulation;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}

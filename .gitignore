@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+*.local
+server/.env
+server/data/
+server/__pycache__/
+**/*.pyc
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+e2e-external/.env
