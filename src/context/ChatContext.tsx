@@ -21,6 +21,7 @@ import {
   sessionToApiMessages,
 } from "../llm/knowledgeBasePrompt";
 import { fetchRagContext, isRagBackendConfigured } from "../services/ragBackend";
+import type { SourceImage } from "../types/chat";
 import {
   buildLearningEnvironmentLoginHelpReply,
   getLearningEnvironmentLoginCta,
@@ -112,6 +113,70 @@ function buildRetrievalQuery(
       core;
   }
   return core.slice(-22_000);
+}
+
+/**
+ * True when the user's question touches eFront configuration concepts.
+ * Used to decide whether to run additional targeted sub-queries.
+ */
+function isConfigurationQuestion(text: string): boolean {
+  return /\b(access.?right|user.?right|condition|region|profile|page|section|control|button|field|visib|accessib|workflow|permission|customize|global|mandatory|warning|error|hide|show|enable|disable|lookup|dynamic|ui|fund|company|deal|report|query)\b/i.test(text);
+}
+
+/**
+ * Topic-targeted sub-queries that force Chroma to fetch from different
+ * semantic neighbourhoods. Each one focuses on a distinct eFront concept cluster
+ * so documents that don't surface in a broad query are still retrieved.
+ */
+const AR_SUB_QUERIES = [
+  "eFront Invest access rights user rights management profiles regions conditions configuration",
+  "eFront Invest global access rights customize access rights pages sections controls buttons",
+  "eFront Invest conditions reusable boolean rules workflow status object state dynamic UI visibility",
+  "eFront Invest regions data segregation multi-client deployment fund visibility",
+  "eFront Invest mandatory warning error field validation workflow-based permissions",
+];
+
+/**
+ * Run the main query plus (for configuration questions) several targeted sub-queries
+ * in parallel, then deduplicate chunks by their opening 140 characters.
+ * This ensures Chroma is asked from multiple semantic directions → multiple documents.
+ */
+async function fetchMultiQueryRag(
+  email: string,
+  mainQuery: string,
+  userText: string,
+  k: number
+): Promise<{ context: string; imageRefs: SourceImage[] }> {
+  const queries: string[] = [mainQuery];
+  if (isConfigurationQuestion(userText)) {
+    for (const sq of AR_SUB_QUERIES) {
+      queries.push(sq + " " + userText.slice(0, 300));
+    }
+  }
+
+  const settled = await Promise.allSettled(
+    queries.map((q) => fetchRagContext(email, q, k))
+  );
+
+  const CHUNK_SEP = "\n\n══════════════\n\n";
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  const images: SourceImage[] = [];
+
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue;
+    const { context, imageRefs } = result.value;
+    for (const img of imageRefs) images.push(img);
+    if (!context?.trim()) continue;
+    for (const chunk of context.split(CHUNK_SEP)) {
+      const key = chunk.replace(/\s+/g, " ").slice(0, 140).trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      parts.push(chunk.trim());
+    }
+  }
+
+  return { context: parts.join(CHUNK_SEP), imageRefs: images };
 }
 
 type LlmReplyJob = {
@@ -207,20 +272,31 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const { chatId, pendingId, email, userText, category, priorForApi, userMsg } = job;
       const historyForApi = [...priorForApi, userMsg];
       const retrievalQuery = buildRetrievalQuery(priorForApi, userText, category);
-      /** Keyword windows from full documents (literal phrases). Kept when RAG is on: embeddings can miss exact terms. */
+      /**
+       * Context budget — must be large enough to hold chunks from multiple documents.
+       * 30 000 chars ≈ 7 500 tokens, comfortably within every supported LLM context window.
+       * Previously was 3 500 (one page) which caused single-document answers; do NOT lower again.
+       */
+      const MAX_RETRIEVAL_CHARS = 30_000;
+      /** Keyword windows from full documents (literal phrases, all uploaded files). */
       const keywordContext = buildContextForQuery(category, retrievalQuery);
-      /** RAG+keyword must not slice blindly (long RAG used to wipe out all keyword/upload windows). */
-      const MAX_RETRIEVAL_CHARS = 58_000;
       let fromDocs = keywordContext;
+      let sourceImages: SourceImage[] = [];
       if (isRagBackendConfigured()) {
         try {
-          const chroma = await fetchRagContext(email, retrievalQuery, 40);
-          const rag = chroma?.trim() ?? "";
+          /**
+           * k=30 fetches 30 chunks per sub-query.
+           * fetchMultiQueryRag runs 1 + 5 sub-queries for configuration questions,
+           * then deduplicates — this forces Chroma to surface content from multiple documents.
+           */
+          const ragResult = await fetchMultiQueryRag(email, retrievalQuery, userText, 30);
+          const rag = ragResult.context?.trim() ?? "";
+          sourceImages = ragResult.imageRefs;
           const kw = keywordContext.trim();
           if (rag && kw) {
             const sep =
               "\n\n══════════════\n\n--- Keyword-aligned excerpts (same uploads; complements semantic search) ---\n\n";
-            fromDocs = mergeRagWithKeywordBudget(rag, kw, sep, MAX_RETRIEVAL_CHARS, 12_000);
+            fromDocs = mergeRagWithKeywordBudget(rag, kw, sep, MAX_RETRIEVAL_CHARS, 10_000);
           } else if (rag) {
             fromDocs =
               rag.length <= MAX_RETRIEVAL_CHARS
@@ -231,6 +307,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           console.warn("[RAG search] exception:", e);
           /* keep keywordContext */
         }
+      }
+
+      /* Final hard cap */
+      if (fromDocs.length > MAX_RETRIEVAL_CHARS) {
+        fromDocs = fromDocs.slice(0, MAX_RETRIEVAL_CHARS) + "\n\n…(context truncated to fit model limit)";
       }
 
       const uploadsInCategory = listForCategory(category).length;
@@ -276,7 +357,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           return {
             ...x,
             messages: x.messages.map((m) =>
-              m.id === pendingId ? { ...m, text: assistantText, pending: false } : m
+              m.id === pendingId
+                ? { ...m, text: assistantText, pending: false, contextChars: fromDocs.trim().length, sourceImages: sourceImages.length > 0 ? sourceImages : undefined }
+                : m
             ),
             updatedAt: Date.now(),
           };
