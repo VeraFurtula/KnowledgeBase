@@ -50,5 +50,11 @@ ${ctx}
 --- END DOCUMENT CONTEXT ---
 
 ## Answer "${q}"
-Before writing: (1) list every Source: filename present above, (2) extract from each, (3) synthesize across all into one explanation, (4) end with "**Documentation sources used:**" listing every file drawn from.`;
+
+Before writing do these steps:
+1. **List every unique Source: filename** present in the DOCUMENT CONTEXT above (write them out).
+2. **Extract relevant content from EACH file** — do not skip any file even if it seems secondary.
+3. **Synthesize** — write ONE connected consultant explanation that weaves findings from all files together. Compare where they overlap; combine where they add depth.
+4. **If only 1–2 sources appear** — state this clearly at the start: "Note: the retrieved context contains only [N] source(s): [names]. For a fuller cross-document answer, the user may need to re-index their uploads or rephrase the question." Then answer from what is available.
+5. End with "**Documentation sources used:**" and list every Source: filename you drew from, with one sentence per file explaining what concept it contributed.`;
 }

@@ -115,39 +115,91 @@ function buildRetrievalQuery(
   return core.slice(-22_000);
 }
 
-/**
- * True when the user's question touches eFront configuration concepts.
- * Used to decide whether to run additional targeted sub-queries.
- */
+/** True when the user's question touches eFront configuration concepts. */
 function isConfigurationQuestion(text: string): boolean {
-  return /\b(access.?right|user.?right|condition|region|profile|page|section|control|button|field|visib|accessib|workflow|permission|customize|global|mandatory|warning|error|hide|show|enable|disable|lookup|dynamic|ui|fund|company|deal|report|query)\b/i.test(text);
+  return /\b(access.?right|user.?right|condition|region|profile|page|section|control|button|field|visib|accessib|workflow|permission|customize|global|mandatory|warning|error|hide|show|enable|disable|lookup|dynamic|fund|company|deal|report|query)\b/i.test(text);
 }
 
 /**
- * Topic-targeted sub-queries that force Chroma to fetch from different
- * semantic neighbourhoods. Kept to 2 to limit token usage on free-tier APIs
- * while still covering the two most distinct concept clusters.
+ * Sub-queries targeting distinct document types so Chroma is asked from
+ * different semantic directions. Each query targets a different eFront doc category.
  */
 const AR_SUB_QUERIES = [
-  "eFront Invest global access rights customize pages sections controls buttons conditions reusable rules profile workflow",
-  "eFront Invest regions data segregation mandatory warning error field validation workflow-based permissions dynamic UI",
+  // targets User Rights Management PDF / Administrator Guide
+  "eFront user administration rights management system administrator users groups configuration guide",
+  // targets workflow / fund operations docs
+  "eFront workflow status fund operations regions data segregation multi-client visibility",
+  // targets fields / validation / conditions docs
+  "eFront mandatory warning error field validation conditions JavaScript profile object state",
 ];
 
 /**
- * Run the main query plus (for configuration questions) several targeted sub-queries
- * in parallel, then deduplicate chunks by their opening 140 characters.
- * This ensures Chroma is asked from multiple semantic directions → multiple documents.
+ * Extract the Source: filename from a RAG chunk (first line beginning with "Source:").
+ */
+function chunkSource(chunk: string): string {
+  const m = chunk.match(/^Source:\s*(.+)$/m);
+  return m ? m[1].trim() : "__unknown__";
+}
+
+/**
+ * Re-order deduplicated chunks so that each unique source file gets at least
+ * MIN_PER_SOURCE slots before the dominant document fills the rest of the budget.
+ * This prevents one high-scoring file from monopolising the context window.
+ */
+function diversifyBySource(chunks: string[], minPerSource: number, maxChars: number): string[] {
+  const CHUNK_SEP_LEN = "\n\n══════════════\n\n".length;
+
+  // Group chunks by source filename
+  const bySource = new Map<string, string[]>();
+  for (const chunk of chunks) {
+    const src = chunkSource(chunk);
+    if (!bySource.has(src)) bySource.set(src, []);
+    bySource.get(src)!.push(chunk);
+  }
+
+  // First pass: guaranteed slots for every source
+  const guaranteed: string[] = [];
+  const overflow: string[] = [];
+  for (const sourceChunks of bySource.values()) {
+    guaranteed.push(...sourceChunks.slice(0, minPerSource));
+    overflow.push(...sourceChunks.slice(minPerSource));
+  }
+
+  // Fill remaining budget with leftover chunks
+  const ordered = [...guaranteed, ...overflow];
+  let used = 0;
+  const result: string[] = [];
+  for (const chunk of ordered) {
+    const cost = chunk.length + CHUNK_SEP_LEN;
+    if (used + cost > maxChars) break;
+    result.push(chunk);
+    used += cost;
+  }
+
+  const uniqueSources = new Set(result.map(chunkSource));
+  console.log(
+    `[RAG diversity] ${result.length} chunks from ${uniqueSources.size} source(s):`,
+    [...uniqueSources].join(", ")
+  );
+  return result;
+}
+
+/**
+ * Run the main query plus targeted sub-queries in parallel, deduplicate by
+ * content fingerprint, then enforce per-source diversity before returning.
  */
 async function fetchMultiQueryRag(
   email: string,
   mainQuery: string,
   userText: string,
-  k: number
+  k: number,
+  maxChars: number
 ): Promise<{ context: string; imageRefs: SourceImage[] }> {
   const queries: string[] = [mainQuery];
   if (isConfigurationQuestion(userText)) {
     for (const sq of AR_SUB_QUERIES) {
-      queries.push(sq + " " + userText.slice(0, 300));
+      // Append a short slice of user text so Chroma stays on-topic per sub-query
+      queries.push(sq + " — " + userText.slice(0, 200));
     }
   }
 
@@ -157,7 +209,7 @@ async function fetchMultiQueryRag(
 
   const CHUNK_SEP = "\n\n══════════════\n\n";
   const seen = new Set<string>();
-  const parts: string[] = [];
+  const allChunks: string[] = [];
   const images: SourceImage[] = [];
 
   for (const result of settled) {
@@ -166,14 +218,20 @@ async function fetchMultiQueryRag(
     for (const img of imageRefs) images.push(img);
     if (!context?.trim()) continue;
     for (const chunk of context.split(CHUNK_SEP)) {
-      const key = chunk.replace(/\s+/g, " ").slice(0, 140).trim();
-      if (!key || seen.has(key)) continue;
+      const trimmed = chunk.trim();
+      if (!trimmed) continue;
+      // Deduplicate by first 140 chars of content
+      const key = trimmed.replace(/\s+/g, " ").slice(0, 140);
+      if (seen.has(key)) continue;
       seen.add(key);
-      parts.push(chunk.trim());
+      allChunks.push(trimmed);
     }
   }
 
-  return { context: parts.join(CHUNK_SEP), imageRefs: images };
+  // Enforce source diversity: every document gets at least 2 slots before
+  // the dominant file can fill the rest of the budget.
+  const diverse = diversifyBySource(allChunks, 2, maxChars);
+  return { context: diverse.join(CHUNK_SEP), imageRefs: images };
 }
 
 type LlmReplyJob = {
@@ -284,18 +342,20 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       if (isRagBackendConfigured()) {
         try {
           /**
-           * k=15 per sub-query. fetchMultiQueryRag runs 1 + 2 sub-queries for configuration
-           * questions and deduplicates — forces multiple documents into context while keeping
-           * token usage manageable on free-tier APIs.
+           * k=15 per sub-query. fetchMultiQueryRag runs 1 + 3 sub-queries for configuration
+           * questions, deduplicates, then enforces per-source diversity so no single file
+           * monopolises the context window.
            */
-          const ragResult = await fetchMultiQueryRag(email, retrievalQuery, userText, 15);
+          const ragResult = await fetchMultiQueryRag(email, retrievalQuery, userText, 15, MAX_RETRIEVAL_CHARS);
           const rag = ragResult.context?.trim() ?? "";
           sourceImages = ragResult.imageRefs;
           const kw = keywordContext.trim();
           if (rag && kw) {
             const sep =
               "\n\n══════════════\n\n--- Keyword-aligned excerpts (same uploads; complements semantic search) ---\n\n";
-            fromDocs = mergeRagWithKeywordBudget(rag, kw, sep, MAX_RETRIEVAL_CHARS, 2_500);
+            // minKeywordChars=3 000 ensures keyword excerpts (cross-doc literal hits) always
+            // get a meaningful slice even when RAG chunks are plentiful.
+            fromDocs = mergeRagWithKeywordBudget(rag, kw, sep, MAX_RETRIEVAL_CHARS, 3_000);
           } else if (rag) {
             fromDocs =
               rag.length <= MAX_RETRIEVAL_CHARS
